@@ -1,0 +1,11 @@
+CompileFlags:
+  # 1. 强制添加编译参数
+  Add: 
+    - -std=c++17            # 关键！解决 std::variant 报错
+    - -I/opt/ros/humble/include # 确保找到 ROS 头文件
+    - -Wno-reorder-ctor     # 忽略构造函数顺序警告
+    - -Wno-unused-private-field # 忽略未使用的私有变量警告
+    - -Wno-unused-parameter # 忽略未使用的参数警告
+
+  # 2. 如果你的 compile_commands.json 指向了错误的编译器，这里可以移除它
+  # Remove: [-m*, -f*]
