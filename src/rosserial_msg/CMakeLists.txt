@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(rosserial_server)
+project(rosserial_msg)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -7,12 +7,12 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system)
-find_package(rosserial_msg REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
-
+rosidl_generate_interfaces(${PROJECT_NAME}
+      "msg/TopicInfo.msg"
+      DEPENDENCIES builtin_interfaces)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -25,21 +25,5 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
-
-
-
-
-
-include_directories(include)
-add_executable(serial_node src/serial_node.cpp)
-
-ament_target_dependencies(serial_node rclcpp std_msgs rosserial_msg)
-target_include_directories(serial_node PRIVATE ${Boost_INCLUDE_DIRS})
-target_link_libraries(serial_node  Boost::system)
-
-install(TARGETS serial_node 
-        DESTINATION lib/${PROJECT_NAME})
-
-
 
 ament_package()

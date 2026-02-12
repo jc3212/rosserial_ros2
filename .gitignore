@@ -1,3 +1,14 @@
 build/
 install/
 log/
+compile_commands.json
+# 忽略 IDE 和编辑器配置
+.vscode/
+.idea/
+.clangd/
+.cache/
+*.swp
+*~
+# 忽略 Python 缓存
+__pycache__/
+*.pyc

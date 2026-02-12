@@ -1,14 +1,146 @@
 #pragma once
 #include <boost/asio/read.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <boost/asio.hpp>
+#include <cstring>
+#include <functional>
+#include <iomanip>
 #include <iostream>
+#include <ostream>
+#include <rclcpp/logger.hpp>
+#include <rclcpp/logging.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <chrono>
+#include <stdexcept>
+#include <vector>
 
 namespace {
 std::chrono::steady_clock::time_point last_stop_time_;
+
+class Ros_Stream{
+    public:   
+        Ros_Stream (const uint8_t* buffer, const size_t length): head_(buffer),length_(length),cur_(buffer),end_(buffer+length){
+        };
+        Ros_Stream (const size_t length): head_(nullptr),length_(length),cur_(nullptr),end_(nullptr){
+        };
+        template<typename T>
+        Ros_Stream& operator >> (T& value){
+            if(head_ == nullptr){
+                throw std::out_of_range("The accessed Stream has not been initialized!");
+            }
+            //获取要读取的类型长度
+            size_t value_length = sizeof(value);
+            RCLCPP_DEBUG(rclcpp::get_logger("async_read"),"Request bytes : %d , Remain bytes : %d", value_length, this->get_length());
+            
+
+            //判断缓冲区中剩余长度是否足够
+            if (cur_+value_length <= end_){
+                //小端序
+                std::memcpy(&value, cur_, value_length);
+                cur_ += value_length;
+            }
+            else{
+                throw std::out_of_range("Serialization data access out of bounds!");
+
+                }
+
+            return *this;
+
+        }
+        Ros_Stream& operator >>(std::string& val_string){
+            if(head_ == nullptr){
+                throw std::out_of_range("The accessed Stream has not been initialized!");
+            }
+            size_t len = val_string.size();
+            if(!len){
+                throw std::out_of_range("The length of the string to be written is undefined.");
+            }
+            if (get_length()< len){
+                throw std::out_of_range("Serialization data access out of bounds!");
+            }
+            else{
+                memcpy(&val_string[0], cur_, len);
+                cur_ += len;
+            }
+            return *this;
+        }
+        Ros_Stream& operator >>(Ros_Stream& write_stream){
+
+            size_t request_length = write_stream.get_length();
+
+            if(head_ == nullptr){
+                throw std::out_of_range("The accessed Stream has not been initialized!");
+            }
+            //获取要读取的类型长度
+            RCLCPP_DEBUG(rclcpp::get_logger("async_read"),"Request bytes : %d , Remain bytes : %d", request_length, this->get_length());
+
+            //判断缓冲区中剩余长度是否足够
+            if (cur_+request_length <= end_){
+                //小端序
+                write_stream.head_ = cur_;
+                write_stream.length_ = request_length;
+                write_stream.cur_ = cur_;
+                write_stream.end_ = cur_ + request_length;
+                cur_ += request_length;
+            }
+            else{
+                throw std::out_of_range("Serialization data access out of bounds!");
+
+                }
+
+            return *this;
+        }
+        size_t get_length()const {
+            if(head_== nullptr&&end_==nullptr){
+                RCLCPP_DEBUG(rclcpp::get_logger("async_read"),"The pointer has not been initialized yet! The returned value is the initialized length.");
+                get_total_length();
+            }
+            else{
+                return static_cast<int>(end_ - cur_);
+
+            }
+        }
+        size_t get_total_length()const{
+            return length_;
+        }
+        const uint8_t* get_head()const{
+            return head_; 
+        }
+        const uint8_t* get_cur()const{
+            return cur_;
+        }
+
+
+    private:
+
+        const uint8_t* cur_;
+        const uint8_t* head_;
+        const uint8_t* end_;
+        size_t length_;
+
+};
+std::ostream& operator << (std::ostream& os,const Ros_Stream& stream){
+    const size_t length = stream.get_total_length();
+    const uint8_t* data = stream.get_head();
+    os << "[";
+    std::ios state(nullptr);
+    state.copyfmt(os);
+
+    os << std::hex << std::setfill('0');
+
+    for(size_t i =0; i < length; i++)
+    {
+        os<<"0x"<<std::setw(2)<<static_cast<int>(data[i]);
+    }
+    os.copyfmt(state);
+    os << "]";
+    return os;
+}
+
+
 
 template <typename AsyncReadStream>
 class AsyncReadBuffer
@@ -20,12 +152,12 @@ public:
         reset();
         mem_.resize(capacity);
     }
-    void read(size_t requested_bytes, std::function<void(const rclcpp::SerializedMessage&)>callback)
+    void read(size_t requested_bytes, std::function<void(Ros_Stream&)>callback)
     {
 
         auto now = std::chrono::steady_clock::now();
         auto gap = now - last_stop_time_;
-        RCLCPP_WARN(rclcpp::get_logger("gap_check"), "IO Gap detected: %ld us", gap);
+        //RCLCPP_WARN(rclcpp::get_logger("gap_check"), "IO Gap detected: %ld us", gap);
         read_sussess_callback_ = callback;
         read_requested_bytes_ = requested_bytes;
         if(read_requested_bytes_ >mem_.size()||!read_requested_bytes_)
@@ -92,7 +224,8 @@ private:
     size_t read_requested_bytes_;
     size_t Already_bytes(){return write_index_- read_index_;};
     size_t Tail_Remain_bytes(){return mem_.size() - write_index_;};
-    std::function<void(rclcpp::SerializedMessage serial_msg)> read_sussess_callback_;
+//   std::function<void(rclcpp::SerializedMessage serial_msg)> read_sussess_callback_;
+    std::function<void(Ros_Stream&)> read_sussess_callback_;
 
     void read_callback(const boost::system::error_code& ec , const size_t& transfer_bytes){
         if(ec){
@@ -118,14 +251,19 @@ private:
         // if(!rclcpp::ok()){
         //     return;
         // }
-        last_stop_time_ = std::chrono::steady_clock::now(); 
-        RCLCPP_DEBUG(rclcpp::get_logger("async_read"), "Reading Message from buffer.");
-        rclcpp::SerializedMessage serial_msg(read_requested_bytes_);
-        auto& rcl_msg = serial_msg.get_rcl_serialized_message();
-        memcpy(rcl_msg.buffer, &mem_[read_index_],read_requested_bytes_);
-        rcl_msg.buffer_length = read_requested_bytes_;
+        // last_stop_time_ = std::chrono::steady_clock::now(); 
+        // RCLCPP_DEBUG(rclcpp::get_logger("async_read"), "Reading Message from buffer.");
+        // rclcpp::SerializedMessage serial_msg(read_requested_bytes_);
+        // auto& rcl_msg = serial_msg.get_rcl_serialized_message();
+        // memcpy(rcl_msg.buffer, &mem_[read_index_],read_requested_bytes_);
+        // rcl_msg.buffer_length = read_requested_bytes_;
+        // read_index_ += read_requested_bytes_;
+
+        //使用rosserial式的字节流的形式
+        Ros_Stream read_stream_(&mem_[read_index_], read_requested_bytes_);
         read_index_ += read_requested_bytes_;
-        boost::asio::post(stream_.get_executor(), std::bind(read_sussess_callback_, serial_msg));
+
+        boost::asio::post(stream_.get_executor(), std::bind(read_sussess_callback_, read_stream_));
     };
 
 
