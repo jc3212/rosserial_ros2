@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <ostream>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -21,15 +22,16 @@ struct Serial_Config {
     };
     
 
-//SerialDrive只作为普通的C++类进行实现，通过持有节点的弱指针来实现节点相关的函数调用
+//SerialDrive只作为普通的C++类进行实现，通过持有节点的弱指针来实现节点相关的函数调用，作为主体
 class SerialDrive 
 {
     public:
         SerialDrive (std::shared_ptr<Serial_Config> serial_config, rclcpp::Node* node, std::string node_name = "serial_drive"): 
         node_(node),serial_config_(serial_config) {
-            pub_ = publish_test(node_);
-            open_serial(serial_config_->port_, serial_config_->baud_);
-            start_read();
+            //pub_ = publish_test(node_);
+            //open_serial(serial_config_->port_, serial_config_->baud_);
+            //start_read();
+            sub_ = subscribe_test(node_);
         }
         //避免出现io_context停止后需要pull执行取消，但定时器已经销毁的情况
         ~SerialDrive (){
@@ -57,6 +59,7 @@ class SerialDrive
         std::shared_ptr<AsyncReadBuffer<boost::asio::serial_port>> async_reader_;
         std::map<uint16_t, std::function<void(Ros_Stream&)>> callback_;
         std::shared_ptr<Serial_Publisher> pub_;
+        std::shared_ptr<Serial_Subscriber>sub_;
 
     
     public:
@@ -217,14 +220,10 @@ class SerialDrive
                 //待写一些判断逻辑
                 //std::cout<< read_stream << std::endl;
                 RCLCPP_DEBUG(node_-> get_logger(), "Rcceive message!");
-                pub_->handle(body_stream);
+                //pub_->handle(body_stream);
                 //callback_[topic_id](body_stream);
                 read_async_head();
             }
-
-
-
-
 
         }
         //计算长度的字节之和
@@ -240,8 +239,14 @@ class SerialDrive
             return sum;
 
         }
+        //向下位机写入数据
+        void write_to_serial(){
 
-        private:
+
+        }
+
+    private:
+        //打开串口
         bool open_serial(const std::string& port, const int& baud)
         {
             boost::system::error_code ec;
@@ -272,7 +277,7 @@ class SerialDrive
             async_reader_ = std::make_shared <AsyncReadBuffer<boost::asio::serial_port>>(serial_, 512);
             return true;
         }   
-    
+        //用于修改串口参数后重启串口
         bool reload_hardware(std::string port, const int& baud)
         {
             boost::system::error_code ec;

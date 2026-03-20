@@ -5,16 +5,20 @@
 #include <cstring>
 #include <exception>
 #include <rcl/publisher.h>
+#include <rclcpp/create_generic_subscription.hpp>
+#include <rclcpp/generic_subscription.hpp>
 #include <rclcpp/node.hpp>
 #include <rmw/serialized_message.h>
 #include <rmw/ret_types.h>
 #include <rosidl_runtime_c/message_type_support_struct.h>
 #include <rosidl_runtime_cpp/message_initialization.hpp>
 #include <rosidl_typesupport_introspection_c/field_types.h>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <memory>
-//自定义
+//自定义消息
 #include <rosserial_msg/msg/detail/topic_info__struct.hpp>
 #include "rosserial_msg/msg/topic_info.hpp"
 #include "rosserial_server/async_read_buffer.hpp"
@@ -40,6 +44,58 @@
 
 namespace ros2_serial{
 
+class Write_Buffer{
+public:
+
+    Write_Buffer(size_t len):write_len_(0){
+        serial_msg_.resize(len);
+    }
+    size_t get_len() const{return serial_msg_.size();}
+    size_t get_remain()const{return (get_len() - write_len_);}
+    size_t get_write_len() const{return write_len_;}
+
+    void ensure_size(size_t size){
+        if(size < serial_msg_.size()){
+            return;  
+        }
+        serial_msg_.resize(size);
+    }
+    uint8_t* get_wptr(){
+        return serial_msg_.data() + write_len_;
+    }
+    const uint8_t* get_data() const{
+        return serial_msg_.data();
+    }
+    //真正读写的函数
+    void buffer_write(const void* read_ptr, size_t n){
+        if (n==0){
+            return;
+        }
+        if (!read_ptr){
+            throw std::invalid_argument("read_ptr is null");
+        }
+        if(get_remain() < n){
+            ensure_size(get_write_len() + n);
+        }
+        memcpy(get_wptr(), read_ptr, n);
+        write_len_ += n;
+    }
+    //为平凡类设计的读写函数,针对数组写了对应的处理逻辑，通过连续空间的memcpy实现
+    void read_and_mv_ptr(const void* read_ptr, const rosidl_typesupport_introspection_cpp::MessageMember& member, size_t elem_size){
+        //对于存在的无上界数组（array_size == 0）进行判断处理
+        if(member.is_array_&&(member.is_upper_bound_||!member.array_size_)){
+            throw std::runtime_error("sequence/vector not supported");
+        }
+        size_t count = member.is_array_ ? member.array_size_ : 1;
+        buffer_write(read_ptr, count*elem_size);
+    }
+
+private:
+    size_t write_len_;
+    std::vector<uint8_t> serial_msg_;
+};
+
+//处理ros1和ros2之间的数据转换
 class Stream_Deserialization
 {
     public:
@@ -57,7 +113,7 @@ class Stream_Deserialization
             std::string pkg_name, msg_name;
             size_t slash_pos = topic_info.message_type.find('/');
             if(slash_pos == std::string::npos){
-                RCLCPP_ERROR(rclcpp::get_logger("data_serizelize"), "Invalid type format: %s", topic_info.message_type.c_str());
+                RCLCPP_ERROR(rclcpp::get_logger("data_serialize"), "Invalid type format: %s", topic_info.message_type.c_str());
                 return false;
             }
             pkg_name = topic_info.message_type.substr(0,slash_pos);
@@ -79,6 +135,7 @@ class Stream_Deserialization
                 return;
             }
             //由于不知道具体消息的格式，只能手动进行new ClassNmae()的操作
+            //调用构造函数
             //分配裸内存,此时仅有内存
             std::vector<uint8_t>raw_buffer(members_->size_of_);
             void* msg_obj = raw_buffer.data();
@@ -87,13 +144,13 @@ class Stream_Deserialization
                 members_->init_function(msg_obj, rosidl_runtime_cpp::MessageInitialization::ALL);
             }
             //填充数据
-            bool parse_success = deserialize_to_struct(stream, msg_obj,members_);
+            bool parse_success = deserialize_ros1_to_struct(stream, msg_obj,members_);
             if(!parse_success){
-                RCLCPP_WARN(rclcpp::get_logger("data_serizelize"),"Message deserialization failed, unable to publish correctly");
+                RCLCPP_WARN(rclcpp::get_logger("data_serialize"),"Message deserialization failed, unable to publish correctly");
                 if(members_->fini_function){
-                    members_->fini_function(msg_obj);
-                }
+                    members_->fini_function(msg_obj);}
             }
+
             //将消息对象序列化成CDR数据
             //预分配CDR缓冲区
             rcutils_allocator_t allocator = rcutils_get_default_allocator();
@@ -103,20 +160,20 @@ class Stream_Deserialization
             // 调用底层 RMW 序列化： C++ Object -> CDR Bytes
             // 这一步会自动处理 Padding 和 Byte Order
             if(ret_init == RMW_RET_OK){
-                RCLCPP_WARN(rclcpp::get_logger("data_serizelize"),"Message deserialization init successful");
+                RCLCPP_WARN(rclcpp::get_logger("data_serialize"),"Message deserialization init successful");
                 auto ret_serialize = rmw_serialize(msg_obj, type_cdr_support_, &serialized_msg);
                 if(ret_serialize == RMW_RET_OK){
-                    RCLCPP_WARN(rclcpp::get_logger("data_serizelize"),"Message deserialization successful");
+                    RCLCPP_WARN(rclcpp::get_logger("data_serialize"),"Message deserialization successful");
                     rclcpp::SerializedMessage cpp_serialized_msg(serialized_msg);
                     pub->publish(cpp_serialized_msg);                
                 }
                 else {
                 
-                    RCLCPP_WARN(rclcpp::get_logger("data_serizelize"),"Message deserialization failed");
+                    RCLCPP_WARN(rclcpp::get_logger("data_serialize"),"Message deserialization failed");
                 }
             }
             else {
-                RCLCPP_ERROR(rclcpp::get_logger("data_serizelize"), "Failed to serialize message");
+                RCLCPP_ERROR(rclcpp::get_logger("data_serialize"), "Failed to serialize message");
             }
             //析构对象
             if(members_->fini_function){
@@ -127,17 +184,17 @@ class Stream_Deserialization
             rmw_serialized_message_fini(&serialized_msg);
 
         }
-        bool deserialize_to_struct(Ros_Stream& stream, void* msg_obj, const rosidl_typesupport_introspection_cpp::MessageMembers* members){
+        bool deserialize_ros1_to_struct(Ros_Stream& stream, void* msg_obj, const rosidl_typesupport_introspection_cpp::MessageMembers* members){
             //将void*指针转换成uint_8指针
             uint8_t* base_ptr = static_cast<uint8_t*>(msg_obj);
 
             for(size_t i = 0; i < members->member_count_; i++){
-                RCLCPP_INFO(rclcpp::get_logger("data_serizelize"), "DEBUG: Enter deserialize. Msg: %s, Members Addr: %p", members->message_name_, (void*)members_);
+                RCLCPP_INFO(rclcpp::get_logger("data_serialize"), "DEBUG: Enter deserialize. Msg: %s, Members Addr: %p", members->message_name_, (void*)members);
 
                 const auto& member = members->members_[i];
                 uint8_t* mem_ptr = base_ptr + members->members_[i].offset_;
-                RCLCPP_INFO(rclcpp::get_logger("data_serizelize"), "DEBUG: Parsing member: %s, type: %d", member.name_, member.type_id_);
-                if (member.is_array_&&!member.is_upper_bound_&&member.array_size_>0){
+                RCLCPP_INFO(rclcpp::get_logger("data_serialize"), "DEBUG: Parsing member: %s, type: %d", member.name_, member.type_id_);
+                if (member.is_array_&&!member.is_upper_bound_&&member.array_size_>0&&member.type_id_ == rosidl_typesupport_introspection_cpp::ROS_TYPE_DOUBLE){
                     //处理double数组
                     double* arry_ptr = static_cast<double*>(reinterpret_cast<void*>(mem_ptr));
                     for(size_t k=0; k < member.array_size_; k++){
@@ -145,7 +202,7 @@ class Stream_Deserialization
                     }
                 }
                 else if(member.is_array_){
-                    RCLCPP_WARN(rclcpp::get_logger("data_serizelize"), "Arrays not supported yet, skipping field %s", member.name_);
+                    RCLCPP_WARN(rclcpp::get_logger("data_serialize"), "Arrays not supported yet, skipping field %s", member.name_);
                     return false; // 暂时直接报错，防止错位
                 }
                 else{
@@ -198,7 +255,7 @@ class Stream_Deserialization
                         uint32_t len;
                         stream >> len;
                         if(len > 400){
-                            RCLCPP_ERROR(rclcpp::get_logger("data_serizelize"), 
+                            RCLCPP_ERROR(rclcpp::get_logger("data_serialize"), 
                             "Abnormal string length detected for %s: %u. Max allowed: 2048. Skipping...", 
                             member.name_, len);
                         return false; // 报错退出，防止崩溃
@@ -214,9 +271,9 @@ class Stream_Deserialization
                         //去掉ros1消息中可能存在的seq字段
                         if (strcmp(member.name_, "header")==0){
                             bool is_std_header = false;
-                            for (size_t h = 0; h <= sub_members->member_count_; h++){
+                            for (size_t h = 0; h < sub_members->member_count_; h++){
                                 //判断条件， 在header中，且该header是std/msg定义的而不是自定义的，通过检查是否存在stamp字段判断
-                                if(strcmp(sub_members->members_[h].name_, "stamp")){
+                                if(!strcmp(sub_members->members_[h].name_, "stamp")){
                                     is_std_header = true;
                                     break;
                                 }
@@ -227,23 +284,154 @@ class Stream_Deserialization
                             }
 
                         }
-                        RCLCPP_INFO(rclcpp::get_logger("data_serizelize"), "DEBUG: Sub-message name: %s, Addr: %p", sub_members->message_name_, (void*)sub_members);
-                        if (!deserialize_to_struct(stream, static_cast<void*>(mem_ptr), sub_members)){
+                        RCLCPP_INFO(rclcpp::get_logger("data_serialize"), "DEBUG: Sub-message name: %s, Addr: %p", sub_members->message_name_, (void*)sub_members);
+                        if (!deserialize_ros1_to_struct(stream, static_cast<void*>(mem_ptr), sub_members)){
                             return false;
                         }
                         break;
                     }
                     default:
                     {
-                        RCLCPP_WARN(rclcpp::get_logger("data_serizelize"), "Undefined type processing for member %s, type_id: %d", member.name_, member.type_id_);
+                        RCLCPP_WARN(rclcpp::get_logger("data_serialize"), "Undefined type processing for member %s, type_id: %d", member.name_, member.type_id_);
                         return false;
                     }
                     
                 }}
             }
             return true;
+        }
+        std::shared_ptr<Write_Buffer> subscribe(std::shared_ptr<rclcpp::SerializedMessage>serialized_msg_ptr){
+            const rmw_serialized_message_t* rmw_serialized_msg = &serialized_msg_ptr->get_rcl_serialized_message();
+            std::vector<uint8_t> raw_buffer(members_->size_of_);
+            void* msg_obj = raw_buffer.data();
+            serial_buffer_ = std::make_shared<Write_Buffer>(members_->size_of_);
+            if(members_->init_function){
+                members_->init_function(msg_obj, rosidl_runtime_cpp::MessageInitialization::ALL);
+            }
+            //调用rmw结构反序列化
+            rmw_ret_t ret_deserialize = rmw_deserialize(rmw_serialized_msg, type_cdr_support_, msg_obj);
+            if(ret_deserialize == RMW_RET_OK){
+                //消息重新序列化成ros1格式
+                if (serialized_struct_to_ros1(msg_obj, serial_buffer_, members_)) {
+                    RCLCPP_DEBUG(rclcpp::get_logger("data_serialize"),"rmw_deserialize from ros2 to ros1 sucess!");
+                }
+            }
+            else{
+                RCLCPP_ERROR(rclcpp::get_logger("data_serialize"),"rmw_deserialize from ros2 to ros1 failed!");
+            }
+            if(members_->fini_function){
+                members_->fini_function(msg_obj);
+            }
+            return serial_buffer_;
+        }
+
+        //将反序列化的ros2消息转换成ros1要求的紧密型数据
+        bool serialized_struct_to_ros1(void* msg_obj, std::shared_ptr<Write_Buffer>serial_buffer,const rosidl_typesupport_introspection_cpp::MessageMembers* members){
+            Ros_Stream stream(static_cast<uint8_t*>(msg_obj), members->size_of_);
+
+            for(size_t i=0; i < members->member_count_; i++){
+                RCLCPP_INFO(rclcpp::get_logger("data_serialize"), "DEBUG: Serialize the structure into padding format data. Msg: %s, Members Addr: %p", members->message_name_, (void*)members_);
+                const auto&member = members->members_[i];
+                
+                uint8_t* msg_ptr = static_cast<uint8_t*>(msg_obj) + member.offset_;
+                RCLCPP_INFO(rclcpp::get_logger("data_serialize"), "DEBUG: Parsing member: %s, type: %d", member.name_, member.type_id_);  
+            
+                switch(member.type_id_){
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_BOOL:
+                    {
+                        serial_buffer->read_and_mv_ptr(msg_ptr, member, sizeof(bool));
+                        break;
+                    }   
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_BYTE:
+                    {
+                        serial_buffer->read_and_mv_ptr(msg_ptr, member, sizeof(uint8_t));
+                        break;
+                    }
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_INT32:
+                    {
+                        serial_buffer->read_and_mv_ptr(msg_ptr, member, sizeof(int32_t));
+                        break;
+                    }
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_UINT32:
+                    {
+                        serial_buffer->read_and_mv_ptr(msg_ptr, member, sizeof(uint32_t));
+
+                        break;
+                    }
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_FLOAT:
+                    {
+                        serial_buffer->read_and_mv_ptr(msg_ptr, member, sizeof(float));
+
+                        break;
+                    }
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_DOUBLE:
+                    {
+                        serial_buffer->read_and_mv_ptr(msg_ptr, member, sizeof(double));
+                        break;
+                    }                    
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_STRING:
+                    {
+                        if(member.is_array_&&(member.is_upper_bound_||!member.array_size_)){
+                            throw std::runtime_error("sequence/string not supported");
+                        }
+                        size_t array_size = member.is_array_ ? member.array_size_ : 1;
+                        const std::string* str_ptr = reinterpret_cast<const std::string*>(msg_ptr);
+                        for(size_t k = 0; k < array_size; k++){
+                            const std::string& msg_string = str_ptr[k];
+                            uint32_t len = msg_string.size();
+                            //rosserail中格式对于string先写入长度
+                            //不涉及到数组直接写入
+                            serial_buffer->buffer_write(&len, sizeof(uint32_t));
+                            //前面已经针对数组做了处理，直接写入string字符串
+                            serial_buffer->buffer_write(msg_string.data(), msg_string.size());
+                        }
+                        break;
+                    }
+                    //ROS消息嵌套的消息类型
+                    case rosidl_typesupport_introspection_cpp::ROS_TYPE_MESSAGE:
+                    {
+
+                        const auto* sub_members = static_cast<const rosidl_typesupport_introspection_cpp::MessageMembers*>(member.members_->data);
+                        //去掉ros1消息中可能存在的seq字段
+                        if (!member.array_size_ && strcmp(member.name_, "header")==0){
+                            bool is_std_header = false;
+                            for (size_t h = 0; h < sub_members->member_count_; h++){
+                                //判断条件， 在header中，且该header是std/msg定义的而不是自定义的，通过检查是否存在stamp字段判断
+                                if(!strcmp(sub_members->members_[h].name_, "stamp")){
+                                    is_std_header = true;
+                                    break;
+                                }
+                            }
+                            if(is_std_header){
+                                uint32_t seq = 0;
+                                serial_buffer->buffer_write(&seq, sizeof(uint32_t));   
+                            }
+
+                        }
+                        size_t array_size = member.is_array_ ? member.array_size_ : 1;
+                        size_t sub_msg_len = sub_members->size_of_;
+                        for(size_t k= 0; k < array_size; k++){
+                            void* sub_msg_ptr = static_cast<uint8_t*>(msg_ptr) + k*sub_msg_len;
+                            RCLCPP_INFO(rclcpp::get_logger("data_serialize"), "DEBUG: Sub-message name: %s, Addr: %p", sub_members->message_name_, (void*)sub_members);
+                            if (!serialized_struct_to_ros1(static_cast<void*>(sub_msg_ptr), serial_buffer, sub_members)){
+                                return false;
+                            }
+                        }
+
+                        break;
+                    }
+                    default:
+                    {
+                        RCLCPP_WARN(rclcpp::get_logger("data_serialize"), "Undefined type processing for member %s, type_id: %d", member.name_, member.type_id_);
+                        return false;
+                    }
+                    
+                    }
+            }
+             return true;
 
         }
+
 
     private:
         //保存动态库句柄
@@ -253,29 +441,35 @@ class Stream_Deserialization
         //类型支持句柄
         const rosidl_message_type_support_t* type_support_;
         const rosidl_message_type_support_t* type_cdr_support_;
+        std::shared_ptr<Write_Buffer> serial_buffer_;
 
         bool load_type_support(const std::string& pkg_name, const std::string& msg_name){
-            std::string perfix;
+            std::string prefix;
             try {
-                perfix = ament_index_cpp::get_package_prefix(pkg_name);
+                prefix = ament_index_cpp::get_package_prefix(pkg_name);
 
             } catch (const std::exception& e) {
-                RCLCPP_ERROR(rclcpp::get_logger("data_serizelize"), "Cannot find package!");
+                RCLCPP_ERROR(rclcpp::get_logger("data_serialize"), "Cannot find package!");
                 return false;
             
             }
             std::string lib_name = "lib" + pkg_name + "__rosidl_typesupport_introspection_cpp.so";
-            std::string lib_path = perfix + "/lib/" + lib_name;
-            RCLCPP_DEBUG(rclcpp::get_logger("data_serizelize"), "Attempting to load library: %s",lib_name.c_str());
+            std::string lib_path = prefix + "/lib/" + lib_name;
+            if (access(lib_path.c_str(), F_OK) != 0) {
+                RCLCPP_ERROR(rclcpp::get_logger("data_serialize"), 
+                 "Library file does NOT exist at parsed path: %s", lib_path.c_str());
+                return false; // 提前拦截，防止 dlopen 去加载错误的系统库或直接崩溃
+            }
+            RCLCPP_DEBUG(rclcpp::get_logger("data_serialize"), "Attempting to load library: %s",lib_name.c_str());
             // 作用：将共享库文件加载到当前进程的地址空间
             // RTLD_LAZY: 懒加载（用到符号时才解析），提高加载速度
             // RTLD_GLOBAL: 让库里的符号对后续加载的库可见
             lib_handle_ = dlopen(lib_name.c_str(), RTLD_LAZY | RTLD_GLOBAL);
             if(!lib_handle_){
-                RCLCPP_ERROR(rclcpp::get_logger("data_serizelize"), "Cannot load library!");
+                RCLCPP_ERROR(rclcpp::get_logger("data_serialize"), "Cannot load library!");
                 return false;
             }else {
-                RCLCPP_DEBUG(rclcpp::get_logger("data_serizelize"), "Loading library sucess!");
+                RCLCPP_DEBUG(rclcpp::get_logger("data_serialize"), "Loading library sucess!");
                 
             }
             //查找符号
@@ -301,7 +495,7 @@ class Stream_Deserialization
             std::string lib_name_cpp = "lib"+pkg_name+"__rosidl_typesupport_cpp.so";
             void* lib_handle_cpp = dlopen(lib_name_cpp.c_str(), RTLD_LAZY);
             if(!lib_handle_cpp){
-                RCLCPP_WARN(rclcpp::get_logger("data_serizelize"), "Failed to load typesupport_cpp: %s", dlerror());
+                RCLCPP_WARN(rclcpp::get_logger("data_serialize"), "Failed to load typesconstupport_cpp: %s", dlerror());
                 return false;
             }
             std::string func_name_cpp = "rosidl_typesupport_cpp__get_message_type_support_handle__"+ pkg_name +"__msg__" +msg_name;
@@ -316,6 +510,7 @@ class Stream_Deserialization
         }
 
 };
+
 
 class Serial_Publisher{
 
@@ -338,21 +533,60 @@ class Serial_Publisher{
         rclcpp::QoS qos_{10};
         std::shared_ptr<Stream_Deserialization> stream_deserialized_;
 
-    };
+};
     
-    
-    std::shared_ptr<Serial_Publisher> publish_test(rclcpp::Node* node)
-    {
-        rosserial_msg::msg::TopicInfo topic_info;
-        topic_info.set__topic_id(1);
-        topic_info.topic_name = "my_imu";
-        topic_info.message_type = "sensor_msgs/msg/Imu";
-        //topic_info.message_type = "geometry_msgs/msg/Twist";
+//在写注册包处理逻辑前指定topic_info进行测试
+std::shared_ptr<Serial_Publisher> publish_test(rclcpp::Node* node){
+    rosserial_msg::msg::TopicInfo topic_info;
+    topic_info.set__topic_id(1);
+    topic_info.topic_name = "my_imu";
+    topic_info.message_type = "sensor_msgs/msg/Imu";
+    //topic_info.message_type = "geometry_msgs/msg/Twist";
         
-        std::shared_ptr<Serial_Publisher> publisher = std::make_shared<Serial_Publisher>(node, topic_info);
-        return publisher;
+    std::shared_ptr<Serial_Publisher> publisher = std::make_shared<Serial_Publisher>(node, topic_info);
+    return publisher;
+}
+
+
+
+
+class Serial_Subscriber{
+public:
+    Serial_Subscriber(rclcpp::Node* node, rosserial_msg::msg::TopicInfo& topic_info):node_(node),topic_info_(topic_info){
+        stream_deserialized_ = std::make_shared<Stream_Deserialization>();
+        stream_deserialized_->init(topic_info_);
+
+        sub_ = node_->create_generic_subscription(topic_info_.topic_name, topic_info_.message_type, qos_, std::bind(&Serial_Subscriber::callback,this,std::placeholders::_1));
+
+    };
+    void callback(std::shared_ptr<rclcpp::SerializedMessage> serialized_msg_ptr){
+        auto serial_msg = stream_deserialized_->subscribe(serialized_msg_ptr);
+        //打印测试
+        Ros_Stream test_stream(serial_msg->get_data(), serial_msg->get_write_len());
+        std::cout<<test_stream;
+        //将数据写入到下位机
     }
 
+
+private:
+    rclcpp::Node* node_;
+    rosserial_msg::msg::TopicInfo topic_info_;
+    rclcpp::GenericSubscription::SharedPtr sub_;
+    std::shared_ptr<Stream_Deserialization> stream_deserialized_;
+    rclcpp::QoS qos_{10};
+
+};
+
+//测试反序列化ros2消息测试
+std::shared_ptr<Serial_Subscriber> subscribe_test(rclcpp::Node* node){
+
+    rosserial_msg::msg::TopicInfo topic_info;
+    topic_info.set__topic_id(1);
+    topic_info.topic_name = "my_imu";
+    topic_info.message_type = "sensor_msgs/msg/Imu";
+    std::shared_ptr<Serial_Subscriber>subscriber = std::make_shared<Serial_Subscriber>(node, topic_info);
+    return subscriber;
+}
 
 
 

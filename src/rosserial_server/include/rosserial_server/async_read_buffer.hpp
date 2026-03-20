@@ -15,11 +15,13 @@
 #include <rclcpp/rclcpp.hpp>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
 std::chrono::steady_clock::time_point last_stop_time_;
 
+//从紧密型数据中读取各个类型的流式操作符
 class Ros_Stream{
     public:   
         Ros_Stream (const uint8_t* buffer, const size_t length): head_(buffer),length_(length),cur_(buffer),end_(buffer+length){
@@ -93,6 +95,24 @@ class Ros_Stream{
 
             return *this;
         }
+        //从消息结构体中读取string,此时的string不再是只有字符串
+        bool read_str_from_struct(std::string& val_string){
+            size_t size_string = sizeof(std::string);
+            if(head_ == nullptr){
+                throw std::out_of_range("The accessed Stream has not been initialized!");
+            }
+            if (get_length()< size_string){
+                throw std::out_of_range("Attempted to read std::string object beyond ROS 2 struct bounds!");
+                return false;
+            }
+            else{
+                const std::string* str_ptr = reinterpret_cast<const std::string*>(cur_);
+                val_string = *str_ptr;
+                
+                cur_ += size_string;
+            }
+            return true;
+        }
         size_t get_length()const {
             if(head_== nullptr&&end_==nullptr){
                 RCLCPP_DEBUG(rclcpp::get_logger("async_read"),"The pointer has not been initialized yet! The returned value is the initialized length.");
@@ -122,21 +142,37 @@ class Ros_Stream{
         size_t length_;
 
 };
-std::ostream& operator << (std::ostream& os,const Ros_Stream& stream){
+//用于打印测试
+std::ostream& operator << (std::ostream& os, const Ros_Stream& stream) {
     const size_t length = stream.get_total_length();
     const uint8_t* data = stream.get_head();
-    os << "[";
-    std::ios state(nullptr);
-    state.copyfmt(os);
+    
+    //仅备份当前流的标志位和填充字符，极其轻量
+    std::ios_base::fmtflags old_flags = os.flags();
+    char old_fill = os.fill();
 
+    // 设置流格式为十六进制，并用 0 填充
     os << std::hex << std::setfill('0');
 
-    for(size_t i =0; i < length; i++)
-    {
-        os<<"0x"<<std::setw(2)<<static_cast<int>(data[i]);
+    os << "[ Length: " << std::dec << length << " bytes ]\n[ "; // 先用十进制打印总长度，再开始数据
+
+    // 切回十六进制
+    os << std::hex;
+    for (size_t i = 0; i < length; i++) {
+        //每次输出完一个字节后，加上一个空格！
+        os << "0x" << std::setw(2) << static_cast<int>(data[i]) << " ";
+        
+        // 每 16 个字节换一次行
+        if ((i + 1) % 16 == 0 && (i + 1) != length) {
+            os << "\n  ";
+        }
     }
-    os.copyfmt(state);
-    os << "]";
+    os << "]\n";
+
+    //恢复流的原始状态
+    os.flags(old_flags);
+    os.fill(old_fill);
+
     return os;
 }
 
@@ -217,6 +253,8 @@ public:
 
 
 private:
+
+    //stream_是传入的socket,串口的读取都要依赖这个句柄完成
     AsyncReadStream& stream_;
     std::vector <uint8_t> mem_;
     size_t write_index_; 
