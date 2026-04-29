@@ -1,15 +1,15 @@
 
 #include <boost/asio.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include "rosserial_server/serial_session.hpp"
 #include <chrono>
+#include "rosserial_server/session/serial_session.hpp"
 
 namespace ros2_serial{
 using namespace std::chrono_literals;
 class SerialNode :public rclcpp::Node {
 public: 
     //传入SerialNode节点指针
-    SerialNode(std::string port = "/dev/ttyUSB_stm32", int baud = 115200,std::string node_name="serial_node") : Node (node_name){
+    SerialNode(std::string port = "/tmp/ttyV0", int baud = 115200,std::string node_name="serial_node") : Node (node_name){
         serial_config_ = std::make_shared<Serial_Config>(port = this->declare_parameter("port", port), baud = this->declare_parameter("baud", baud));
         serial_drive_ = std::make_unique<SerialDrive>(serial_config_,this);
         //动态参数配置
@@ -24,9 +24,8 @@ public:
             RCLCPP_DEBUG(this->get_logger(), "Polling IO context...");
             serial_drive_->run_io_contect();});
     }
-    SerialNode(int test_flag,std::string node_name):Node(node_name){
-        serial_drive_ = std::make_unique<SerialDrive>(serial_config_,this);
-    }
+    //用于测试创建的额外构造函数
+    //仅用于不需要读取串口数据，仅测试发布功能
 
 private:
     std::shared_ptr<Serial_Config> serial_config_;
@@ -41,8 +40,7 @@ private:
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    //auto node = std::make_shared<ros2_serial::SerialNode>();
-    auto node = std::make_shared<ros2_serial::SerialNode>(1,"test_node");
+    auto node = std::make_shared<ros2_serial::SerialNode>();
 
     rclcpp::spin(node);
     rclcpp::shutdown();
