@@ -12,3 +12,8 @@ compile_commands.json
 # 忽略 Python 缓存
 __pycache__/
 *.pyc
+
+AGENTS.md
+*back*
+
+opencode.json
